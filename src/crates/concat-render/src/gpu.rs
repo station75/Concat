@@ -248,22 +248,125 @@ fn ground_at(position: vec4<f32>) -> vec3<f32> {
     return textureSample(ground_texture, ground_sampler, position.xy / size).rgb;
 }
 
-// Lighten and Darken weigh the lighter (darker) of the layer and the
-// ground in by the layer's alpha - a white layer at 30 % over mid grey
-// lightens it 30 % of the way to white - which no fixed-function blend
-// expresses. The ground is a copy taken just before this draw; the
-// result is premultiplied and blended source-over, so what lands is
-// max(colour, ground) * alpha + ground * (1 - alpha), the CPU's own line.
-@fragment
-fn fs_lighten(in: VsOut) -> @location(0) vec4<f32> {
-    let s = shade(in);
-    return vec4<f32>(max(s.rgb, ground_at(in.position)) * s.a, s.a);
+// The blends that read the ground - every mode but Normal, Multiply,
+// Screen and Add - compute B(s, d) from the layer's straight colour and a
+// copy of the ground taken just before this draw, and weigh it in by the
+// layer's alpha: a white layer at 30 % over mid grey lightens it 30 % of
+// the way to white. The result is premultiplied and blended source-over,
+// so what lands is B(s, d) * alpha + ground * (1 - alpha), the CPU's own
+// line. `mode` is the blend's index in `Blend::ALL`; each mode has its
+// own entry point, `fs_ground_<mode>`, written out in Rust (see
+// `ground_entries`). The formulas are the W3C compositing ones and match
+// `Blend::over_ground` line for line.
+fn burn(s: f32, d: f32) -> f32 {
+    if d >= 1.0 { return 1.0; }
+    if s <= 0.0 { return 0.0; }
+    return 1.0 - min(1.0, (1.0 - d) / s);
 }
 
-@fragment
-fn fs_darken(in: VsOut) -> @location(0) vec4<f32> {
+fn dodge(s: f32, d: f32) -> f32 {
+    if d <= 0.0 { return 0.0; }
+    if s >= 1.0 { return 1.0; }
+    return min(1.0, d / (1.0 - s));
+}
+
+fn hard(s: f32, d: f32) -> f32 {
+    if s <= 0.5 { return 2.0 * s * d; }
+    let t = 2.0 * s - 1.0;
+    return t + d - t * d;
+}
+
+fn soft(s: f32, d: f32) -> f32 {
+    if s <= 0.5 { return d - (1.0 - 2.0 * s) * d * (1.0 - d); }
+    var e = sqrt(d);
+    if d <= 0.25 { e = ((16.0 * d - 12.0) * d + 4.0) * d; }
+    return d + (2.0 * s - 1.0) * (e - d);
+}
+
+fn vivid(s: f32, d: f32) -> f32 {
+    if s <= 0.5 { return burn(2.0 * s, d); }
+    return dodge(2.0 * s - 1.0, d);
+}
+
+fn pin(s: f32, d: f32) -> f32 {
+    if s <= 0.5 { return min(d, 2.0 * s); }
+    return max(d, 2.0 * s - 1.0);
+}
+
+fn divide(s: f32, d: f32) -> f32 {
+    if s <= 0.0 { return select(0.0, 1.0, d > 0.0); }
+    return min(1.0, d / s);
+}
+
+fn lum(c: vec3<f32>) -> f32 {
+    return dot(c, vec3<f32>(0.3, 0.59, 0.11));
+}
+
+fn clip_color(c_in: vec3<f32>) -> vec3<f32> {
+    var c = c_in;
+    let l = lum(c);
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    if n < 0.0 && l - n > 0.0 { c = l + (c - l) * l / (l - n); }
+    if x > 1.0 && x - l > 0.0 { c = l + (c - l) * (1.0 - l) / (x - l); }
+    return c;
+}
+
+fn set_lum(c: vec3<f32>, l: f32) -> vec3<f32> {
+    return clip_color(c + (l - lum(c)));
+}
+
+fn sat(c: vec3<f32>) -> f32 {
+    return max(max(c.r, c.g), c.b) - min(min(c.r, c.g), c.b);
+}
+
+fn set_sat(c: vec3<f32>, s: f32) -> vec3<f32> {
+    let n = min(min(c.r, c.g), c.b);
+    let x = max(max(c.r, c.g), c.b);
+    if x > n { return (c - n) * s / (x - n); }
+    return vec3<f32>(0.0);
+}
+
+fn per_channel(mode: u32, s: f32, d: f32) -> f32 {
+    switch mode {
+        case 3u: { return burn(s, d); }
+        case 4u: { return max(s + d - 1.0, 0.0); }
+        case 7u: { return dodge(s, d); }
+        case 9u: { return hard(d, s); }
+        case 10u: { return soft(s, d); }
+        case 11u: { return hard(s, d); }
+        case 12u: { return vivid(s, d); }
+        case 13u: { return clamp(d + 2.0 * s - 1.0, 0.0, 1.0); }
+        case 14u: { return pin(s, d); }
+        case 15u: { return select(0.0, 1.0, s + d >= 1.0); }
+        case 16u: { return abs(s - d); }
+        case 17u: { return s + d - 2.0 * s * d; }
+        case 18u: { return max(d - s, 0.0); }
+        case 19u: { return divide(s, d); }
+        default: { return s; }
+    }
+}
+
+fn blend_ground(mode: u32, s_in: vec3<f32>, d_in: vec3<f32>) -> vec3<f32> {
+    // Lighten and Darken, unclamped, as they always were.
+    if mode == 1u { return min(s_in, d_in); }
+    if mode == 5u { return max(s_in, d_in); }
+    let s = clamp(s_in, vec3<f32>(0.0), vec3<f32>(1.0));
+    let d = clamp(d_in, vec3<f32>(0.0), vec3<f32>(1.0));
+    switch mode {
+        case 20u: { return set_lum(set_sat(s, sat(d)), lum(d)); }
+        case 21u: { return set_lum(set_sat(d, sat(s)), lum(d)); }
+        case 22u: { return set_lum(s, lum(d)); }
+        case 23u: { return set_lum(d, lum(s)); }
+        default: {
+            return vec3<f32>(per_channel(mode, s.r, d.r), per_channel(mode, s.g, d.g), per_channel(mode, s.b, d.b));
+        }
+    }
+}
+
+fn shade_ground(in: VsOut, mode: u32) -> vec4<f32> {
     let s = shade(in);
-    return vec4<f32>(min(s.rgb, ground_at(in.position)) * s.a, s.a);
+    return vec4<f32>(blend_ground(mode, s.rgb, ground_at(in.position)) * s.a, s.a);
 }
 "#;
 
@@ -557,6 +660,22 @@ fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+/// One WGSL entry point for each blend that reads the ground,
+/// `fs_ground_<index in Blend::ALL>`, each calling `shade_ground` with its
+/// mode, so a mode is a constant the compiler can fold.
+fn ground_entries() -> String {
+    Blend::ALL
+        .iter()
+        .enumerate()
+        .filter(|(_, mode)| mode.reads_ground())
+        .map(|(index, _)| {
+            format!(
+                "\n@fragment\nfn fs_ground_{index}(in: VsOut) -> @location(0) vec4<f32> {{\n    return shade_ground(in, {index}u);\n}}\n"
+            )
+        })
+        .collect()
+}
+
 /// One draw of a composite: the pooled texture drawn, how it meets the
 /// ground, and the pooled texture masking it - the one white pixel for a
 /// layer without a mask.
@@ -565,9 +684,9 @@ struct Draw {
     texture: usize,
     blend: Blend,
     mask: (u32, u32, usize),
-    /// For a Lighten or Darken layer: the pooled texture, at the output
+    /// For a layer whose blend reads the ground: the pooled texture, at the output
     /// size, that the ground is copied into just before the draw, for its
-    /// fragment stage to sample. See `fs_lighten` in [`SHADER`].
+    /// fragment stage to sample. See `blend_ground` in [`SHADER`].
     ground: Option<usize>,
 }
 
@@ -681,9 +800,10 @@ pub struct WgpuCompositor {
     queue: wgpu::Queue,
     /// One pipeline per blend mode, indexed as `Blend::ALL` is.
     pipelines: Vec<wgpu::RenderPipeline>,
-    /// Lighten, then Darken: the two blends that sample the ground, drawn
-    /// with a third bind group and plain source-over.
-    ground_pipelines: [wgpu::RenderPipeline; 2],
+    /// For each mode in `Blend::ALL` that reads the ground, its pipeline,
+    /// drawn with a third bind group and plain source-over; None for the
+    /// fixed-function modes.
+    ground_pipelines: Vec<Option<wgpu::RenderPipeline>>,
     /// An uploaded frame into the working format.
     upload_pipeline: wgpu::RenderPipeline,
     /// A finished frame out of the working format into eight bits: as it
@@ -984,7 +1104,9 @@ impl WgpuCompositor {
         let budget = pool_budget_for(device.adapter_info().device_type);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("concat compositor"),
-            source: wgpu::ShaderSource::Wgsl(format!("{MASK_WGSL}{SHADER}").into()),
+            source: wgpu::ShaderSource::Wgsl(
+                format!("{MASK_WGSL}{SHADER}{}", ground_entries()).into(),
+            ),
         });
 
         let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1149,6 +1271,12 @@ impl WgpuCompositor {
                         dst_factor: BlendFactor::One,
                         operation: BlendOperation::Min,
                     },
+                    // Drawn by a ground pipeline; this one is never used.
+                    _ => wgpu::BlendComponent {
+                        src_factor: BlendFactor::One,
+                        dst_factor: BlendFactor::OneMinusSrcAlpha,
+                        operation: BlendOperation::Add,
+                    },
                 };
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("concat compositor"),
@@ -1186,7 +1314,14 @@ impl WgpuCompositor {
             bind_group_layouts: &[Some(&bind_layout), Some(&bind_layout), Some(&bind_layout)],
             immediate_size: 0,
         });
-        let ground_pipelines = ["fs_lighten", "fs_darken"].map(|entry| {
+        let ground_names: Vec<Option<String>> = Blend::ALL
+            .iter()
+            .enumerate()
+            .map(|(index, mode)| mode.reads_ground().then(|| format!("fs_ground_{index}")))
+            .collect();
+        let ground_pipelines: Vec<Option<wgpu::RenderPipeline>> = ground_names
+            .iter()
+            .map(|name| name.as_deref().map(|entry| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(entry),
                 layout: Some(&ground_layout),
@@ -1219,7 +1354,8 @@ impl WgpuCompositor {
                 multiview_mask: None,
                 cache: None,
             })
-        });
+        }))
+            .collect();
 
         // The two copies in and out of the working format; see COPY_SHADER.
         let copy_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1609,7 +1745,7 @@ impl WgpuCompositor {
             )
         };
         let mask = self.mask_of(layer.mask.as_deref());
-        let ground = matches!(layer.blend, Blend::Lighten | Blend::Darken)
+        let ground = layer.blend.reads_ground()
             .then(|| self.claim(plan.width, plan.height));
         draws.push(Draw {
             size,
@@ -2103,8 +2239,14 @@ impl WgpuCompositor {
         for &(index, draw) in draws {
             match draw.ground {
                 Some(ground) => {
-                    let which = usize::from(draw.blend == Blend::Darken);
-                    pass.set_pipeline(&self.ground_pipelines[which]);
+                    let which = Blend::ALL
+                        .iter()
+                        .position(|mode| *mode == draw.blend)
+                        .unwrap_or(0);
+                    let Some(pipeline) = self.ground_pipelines[which].as_ref() else {
+                        continue;
+                    };
+                    pass.set_pipeline(pipeline);
                     pass.set_bind_group(2, &self.pool[&size][ground].bind_group, &[]);
                 }
                 None => {

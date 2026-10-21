@@ -163,12 +163,17 @@ impl Weighing<'_> {
         }
         // In linear light, as the GPU blends: the layer's colour and the
         // ground decoded from their stored gamma, weighed, and encoded back.
+        let colour: [f32; 3] =
+            std::array::from_fn(|channel| self.shading.colour(channel, linear(sample[channel])));
+        let ground: [f32; 3] = std::array::from_fn(|channel| linear(f32::from(under[channel])));
+        let over = self.blend.over_ground(colour, ground);
         for channel in 0..3 {
-            let colour = self.shading.colour(channel, linear(sample[channel]));
-            let ground = linear(f32::from(under[channel]));
-            under[channel] = encoded(mix(self.blend, colour, ground, alpha))
-                .round()
-                .clamp(0.0, 255.0) as u8;
+            let light = if self.blend.reads_ground() {
+                over[channel] * alpha + ground[channel] * (1.0 - alpha)
+            } else {
+                mix(self.blend, colour[channel], ground[channel], alpha)
+            };
+            under[channel] = encoded(light).round().clamp(0.0, 255.0) as u8;
         }
         under[3] = 255;
     }
@@ -203,8 +208,7 @@ fn mix(blend: Blend, colour: f32, under: f32, alpha: f32) -> f32 {
         Blend::Multiply => over * under + under * (1.0 - alpha),
         Blend::Screen => over * (1.0 - under) + under,
         Blend::Add => over + under,
-        Blend::Lighten => colour.max(under) * alpha + under * (1.0 - alpha),
-        Blend::Darken => colour.min(under) * alpha + under * (1.0 - alpha),
+        _ => blend.over_ground([colour; 3], [under; 3])[0] * alpha + under * (1.0 - alpha),
     }
 }
 

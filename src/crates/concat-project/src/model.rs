@@ -1816,8 +1816,8 @@ pub struct Clip {
     /// Mirrored top to bottom.
     #[serde(default, skip_serializing_if = "is_false")]
     pub flip_v: bool,
-    /// How the picture's colour meets what is beneath it: "normal",
-    /// "multiply", "screen", "add", "lighten", "darken".
+    /// How the picture's colour meets what is beneath it: a name from
+    /// `Blend::name` - "normal", "multiply", "screen", "overlay", ...
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub blend: String,
     /// What is cut off each edge of the source before it is fitted, as

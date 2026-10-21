@@ -1163,11 +1163,29 @@ export component VideoPanel inherits VerticalLayout {
 
     property <[string]> blends: [
         I18n.t("clipInspector.normal"),
+        I18n.t("clipInspector.darken"),
         I18n.t("clipInspector.multiply"),
-        I18n.t("clipInspector.screen"),
-        I18n.t("clipInspector.add"),
+        I18n.t("clipInspector.colorBurn"),
+        I18n.t("clipInspector.linearBurn"),
         I18n.t("clipInspector.lighten"),
-        I18n.t("clipInspector.darken")
+        I18n.t("clipInspector.screen"),
+        I18n.t("clipInspector.colorDodge"),
+        I18n.t("clipInspector.add"),
+        I18n.t("clipInspector.overlay"),
+        I18n.t("clipInspector.softLight"),
+        I18n.t("clipInspector.hardLight"),
+        I18n.t("clipInspector.vividLight"),
+        I18n.t("clipInspector.linearLight"),
+        I18n.t("clipInspector.pinLight"),
+        I18n.t("clipInspector.hardMix"),
+        I18n.t("clipInspector.difference"),
+        I18n.t("clipInspector.exclusion"),
+        I18n.t("clipInspector.subtract"),
+        I18n.t("clipInspector.divide"),
+        I18n.t("clipInspector.hue"),
+        I18n.t("clipInspector.saturation"),
+        I18n.t("clipInspector.color"),
+        I18n.t("clipInspector.luminosity")
     ];
 
     init => { root.seed(); }

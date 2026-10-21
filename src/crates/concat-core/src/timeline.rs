@@ -108,49 +108,193 @@ pub struct Clip {
 
 /// How a layer's colour meets what is beneath it.
 ///
-/// Source-over is the ordinary case. The rest are the fixed-function
-/// blends a GPU offers over premultiplied colour, spelled the same way on
-/// the CPU so the two paths agree pixel for pixel: with `s` the layer's
-/// colour times its alpha and `d` the ground, Multiply is `s·d + d(1-a)`,
-/// Screen `s(1-d) + d`, Add `s + d`, Lighten `max(s, d)`, Darken
-/// `min(s, d)`.
+/// Source-over is the ordinary case. Multiply, Screen and Add are the
+/// fixed-function blends a GPU offers over premultiplied colour, spelled the
+/// same way on the CPU so the two paths agree pixel for pixel: with `s` the
+/// layer's colour times its alpha and `d` the ground, Multiply is
+/// `s·d + d(1-a)`, Screen `s(1-d) + d`, Add `s + d`. Every other mode reads
+/// the ground (see [`Blend::reads_ground`]): it computes `B(s, d)` from the
+/// layer's straight colour and the ground and weighs that in by the layer's
+/// alpha, `B(s, d)·a + d(1-a)`. The formulas are the W3C compositing ones,
+/// as Photoshop and the browsers use.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Blend {
     /// Source over: the layer covers what is beneath by its alpha.
     #[default]
     Normal,
-    /// Darkens: the ground times the layer.
-    Multiply,
-    /// Lightens: the inverse of multiplying the inverses.
-    Screen,
-    /// The sum, clipped.
-    Add,
-    /// The brighter of the two, per channel.
-    Lighten,
     /// The darker of the two, per channel.
     Darken,
+    /// Darkens: the ground times the layer.
+    Multiply,
+    /// Darkens the ground to reflect the layer, raising contrast.
+    ColorBurn,
+    /// The sum less one: darkens by the layer's darkness.
+    LinearBurn,
+    /// The brighter of the two, per channel.
+    Lighten,
+    /// Lightens: the inverse of multiplying the inverses.
+    Screen,
+    /// Brightens the ground to reflect the layer, lowering contrast.
+    ColorDodge,
+    /// The sum, clipped (Linear Dodge).
+    Add,
+    /// Multiply or Screen by the ground: contrast that keeps its shadows
+    /// and highlights.
+    Overlay,
+    /// A gentle Overlay led by the layer.
+    SoftLight,
+    /// Multiply or Screen by the layer.
+    HardLight,
+    /// Color Burn or Color Dodge by the layer.
+    VividLight,
+    /// Linear Burn or Add by the layer.
+    LinearLight,
+    /// Darken or Lighten by the layer.
+    PinLight,
+    /// Every channel pushed to black or white.
+    HardMix,
+    /// The difference, either way round.
+    Difference,
+    /// A softer Difference.
+    Exclusion,
+    /// The ground less the layer.
+    Subtract,
+    /// The ground over the layer.
+    Divide,
+    /// The layer's hue with the ground's saturation and luminosity.
+    Hue,
+    /// The layer's saturation with the ground's hue and luminosity.
+    Saturation,
+    /// The layer's hue and saturation with the ground's luminosity.
+    Color,
+    /// The layer's luminosity with the ground's hue and saturation.
+    Luminosity,
 }
 
 impl Blend {
     /// Every mode, in menu order.
-    pub const ALL: [Blend; 6] = [
+    pub const ALL: [Blend; 24] = [
         Blend::Normal,
-        Blend::Multiply,
-        Blend::Screen,
-        Blend::Add,
-        Blend::Lighten,
         Blend::Darken,
+        Blend::Multiply,
+        Blend::ColorBurn,
+        Blend::LinearBurn,
+        Blend::Lighten,
+        Blend::Screen,
+        Blend::ColorDodge,
+        Blend::Add,
+        Blend::Overlay,
+        Blend::SoftLight,
+        Blend::HardLight,
+        Blend::VividLight,
+        Blend::LinearLight,
+        Blend::PinLight,
+        Blend::HardMix,
+        Blend::Difference,
+        Blend::Exclusion,
+        Blend::Subtract,
+        Blend::Divide,
+        Blend::Hue,
+        Blend::Saturation,
+        Blend::Color,
+        Blend::Luminosity,
     ];
 
     /// The mode's name in a document: "normal", "multiply", ...
     pub fn name(self) -> &'static str {
         match self {
             Blend::Normal => "normal",
-            Blend::Multiply => "multiply",
-            Blend::Screen => "screen",
-            Blend::Add => "add",
-            Blend::Lighten => "lighten",
             Blend::Darken => "darken",
+            Blend::Multiply => "multiply",
+            Blend::ColorBurn => "color-burn",
+            Blend::LinearBurn => "linear-burn",
+            Blend::Lighten => "lighten",
+            Blend::Screen => "screen",
+            Blend::ColorDodge => "color-dodge",
+            Blend::Add => "add",
+            Blend::Overlay => "overlay",
+            Blend::SoftLight => "soft-light",
+            Blend::HardLight => "hard-light",
+            Blend::VividLight => "vivid-light",
+            Blend::LinearLight => "linear-light",
+            Blend::PinLight => "pin-light",
+            Blend::HardMix => "hard-mix",
+            Blend::Difference => "difference",
+            Blend::Exclusion => "exclusion",
+            Blend::Subtract => "subtract",
+            Blend::Divide => "divide",
+            Blend::Hue => "hue",
+            Blend::Saturation => "saturation",
+            Blend::Color => "color",
+            Blend::Luminosity => "luminosity",
+        }
+    }
+
+    /// The mode reads the ground beneath the layer to compute its colour,
+    /// which no fixed-function GPU blend can: every mode but Normal,
+    /// Multiply, Screen and Add.
+    pub fn reads_ground(self) -> bool {
+        !matches!(
+            self,
+            Blend::Normal | Blend::Multiply | Blend::Screen | Blend::Add
+        )
+    }
+
+    /// `B(s, d)` for a mode that reads the ground: the layer's straight
+    /// colour `s` and the ground `d`, both linear light, before the layer's
+    /// alpha weighs it in. The CPU's spelling of the GPU's `blend_ground`;
+    /// the fixed-function modes give `s` back.
+    pub fn over_ground(self, s: [f32; 3], d: [f32; 3]) -> [f32; 3] {
+        fn each(s: [f32; 3], d: [f32; 3], f: fn(f32, f32) -> f32) -> [f32; 3] {
+            let (s, d) = (s.map(unit), d.map(unit));
+            [f(s[0], d[0]), f(s[1], d[1]), f(s[2], d[2])]
+        }
+        match self {
+            Blend::Normal | Blend::Multiply | Blend::Screen | Blend::Add => s,
+            Blend::Lighten => [s[0].max(d[0]), s[1].max(d[1]), s[2].max(d[2])],
+            Blend::Darken => [s[0].min(d[0]), s[1].min(d[1]), s[2].min(d[2])],
+            Blend::ColorBurn => each(s, d, color_burn),
+            Blend::LinearBurn => each(s, d, |s, d| (s + d - 1.0).max(0.0)),
+            Blend::ColorDodge => each(s, d, color_dodge),
+            Blend::Overlay => each(s, d, |s, d| hard_light(d, s)),
+            Blend::SoftLight => each(s, d, soft_light),
+            Blend::HardLight => each(s, d, hard_light),
+            Blend::VividLight => each(s, d, vivid_light),
+            Blend::LinearLight => each(s, d, |s, d| (d + 2.0 * s - 1.0).clamp(0.0, 1.0)),
+            Blend::PinLight => each(s, d, |s, d| {
+                if s <= 0.5 {
+                    d.min(2.0 * s)
+                } else {
+                    d.max(2.0 * s - 1.0)
+                }
+            }),
+            Blend::HardMix => each(s, d, |s, d| if s + d >= 1.0 { 1.0 } else { 0.0 }),
+            Blend::Difference => each(s, d, |s, d| (s - d).abs()),
+            Blend::Exclusion => each(s, d, |s, d| s + d - 2.0 * s * d),
+            Blend::Subtract => each(s, d, |s, d| (d - s).max(0.0)),
+            Blend::Divide => each(s, d, |s, d| {
+                if s <= 0.0 {
+                    if d > 0.0 { 1.0 } else { 0.0 }
+                } else {
+                    (d / s).min(1.0)
+                }
+            }),
+            Blend::Hue => {
+                let (s, d) = (s.map(unit), d.map(unit));
+                set_lum(set_sat(s, sat(d)), lum(d))
+            }
+            Blend::Saturation => {
+                let (s, d) = (s.map(unit), d.map(unit));
+                set_lum(set_sat(d, sat(s)), lum(d))
+            }
+            Blend::Color => {
+                let (s, d) = (s.map(unit), d.map(unit));
+                set_lum(s, lum(d))
+            }
+            Blend::Luminosity => {
+                let (s, d) = (s.map(unit), d.map(unit));
+                set_lum(d, lum(s))
+            }
         }
     }
 
@@ -160,6 +304,97 @@ impl Blend {
             .into_iter()
             .find(|mode| mode.name() == name.trim())
             .unwrap_or_default()
+    }
+}
+
+fn unit(x: f32) -> f32 {
+    x.clamp(0.0, 1.0)
+}
+
+fn color_burn(s: f32, d: f32) -> f32 {
+    if d >= 1.0 {
+        1.0
+    } else if s <= 0.0 {
+        0.0
+    } else {
+        1.0 - ((1.0 - d) / s).min(1.0)
+    }
+}
+
+fn color_dodge(s: f32, d: f32) -> f32 {
+    if d <= 0.0 {
+        0.0
+    } else if s >= 1.0 {
+        1.0
+    } else {
+        (d / (1.0 - s)).min(1.0)
+    }
+}
+
+fn hard_light(s: f32, d: f32) -> f32 {
+    if s <= 0.5 {
+        2.0 * s * d
+    } else {
+        let t = 2.0 * s - 1.0;
+        t + d - t * d
+    }
+}
+
+fn soft_light(s: f32, d: f32) -> f32 {
+    if s <= 0.5 {
+        d - (1.0 - 2.0 * s) * d * (1.0 - d)
+    } else {
+        let e = if d <= 0.25 {
+            ((16.0 * d - 12.0) * d + 4.0) * d
+        } else {
+            d.sqrt()
+        };
+        d + (2.0 * s - 1.0) * (e - d)
+    }
+}
+
+fn vivid_light(s: f32, d: f32) -> f32 {
+    if s <= 0.5 {
+        color_burn(2.0 * s, d)
+    } else {
+        color_dodge(2.0 * s - 1.0, d)
+    }
+}
+
+fn lum(c: [f32; 3]) -> f32 {
+    0.3 * c[0] + 0.59 * c[1] + 0.11 * c[2]
+}
+
+fn clip_color(c: [f32; 3]) -> [f32; 3] {
+    let l = lum(c);
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    let mut c = c;
+    if n < 0.0 && l - n > 0.0 {
+        c = c.map(|v| l + (v - l) * l / (l - n));
+    }
+    if x > 1.0 && x - l > 0.0 {
+        c = c.map(|v| l + (v - l) * (1.0 - l) / (x - l));
+    }
+    c
+}
+
+fn set_lum(c: [f32; 3], l: f32) -> [f32; 3] {
+    let d = l - lum(c);
+    clip_color(c.map(|v| v + d))
+}
+
+fn sat(c: [f32; 3]) -> f32 {
+    c[0].max(c[1]).max(c[2]) - c[0].min(c[1]).min(c[2])
+}
+
+fn set_sat(c: [f32; 3], s: f32) -> [f32; 3] {
+    let n = c[0].min(c[1]).min(c[2]);
+    let x = c[0].max(c[1]).max(c[2]);
+    if x > n {
+        c.map(|v| (v - n) * s / (x - n))
+    } else {
+        [0.0; 3]
     }
 }
 

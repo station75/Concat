@@ -382,7 +382,7 @@ export struct SelectedClipData {
     // the picture's edges and colour
     flip-h: bool,
     flip-v: bool,
-    /// index into the blend list: normal, multiply, screen, add, lighten, darken
+    /// index into the blend list, in `Blend::ALL` order: normal, darken, multiply, ...
     blend: int,
     crop-left: float,
     crop-top: float,
